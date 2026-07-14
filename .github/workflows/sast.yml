@@ -1,0 +1,131 @@
+name: SAST - Juice Shop
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  codeql:
+    name: CodeQL SAST
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["javascript-typescript"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: +security-extended,security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze with CodeQL
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: codeql-results
+
+      - name: Upload CodeQL SARIF report as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codeql-sarif-report
+          path: codeql-results
+          if-no-files-found: warn
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Semgrep
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep
+
+      - name: Prepare reports directory
+        run: mkdir -p reports
+
+      - name: Run Semgrep SARIF scan
+        run: |
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/javascript \
+            --sarif \
+            --output reports/semgrep.sarif \
+            . || true
+
+      - name: Run Semgrep JSON scan
+        run: |
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/javascript \
+            --json \
+            --output reports/semgrep.json \
+            . || true
+
+      - name: Create Semgrep text summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = Path("reports/semgrep.json")
+          out = Path("reports/semgrep-summary.txt")
+
+          if not report.exists():
+              out.write_text("Semgrep JSON report was not generated.\n")
+              raise SystemExit(0)
+
+          data = json.loads(report.read_text())
+          results = data.get("results", [])
+
+          lines = []
+          lines.append(f"Total Semgrep findings: {len(results)}")
+          lines.append("=" * 80)
+
+          for i, finding in enumerate(results[:50], start=1):
+              extra = finding.get("extra", {})
+              lines.append(f"{i}. Rule: {finding.get('check_id')}")
+              lines.append(f"   Severity: {extra.get('severity')}")
+              lines.append(f"   Message: {extra.get('message')}")
+              lines.append(f"   File: {finding.get('path')}")
+              lines.append(f"   Line: {finding.get('start', {}).get('line')}")
+              lines.append("-" * 80)
+
+          out.write_text("\n".join(lines))
+          PY
+
+      - name: Upload Semgrep SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: reports/semgrep.sarif
+          category: semgrep
+
+      - name: Upload Semgrep reports as artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-sast-reports
+          path: reports/
