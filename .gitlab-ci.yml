@@ -1,7 +1,73 @@
+stages:
+  - test
+  - report
+
 include:
-  - template: Auto-DevOps.gitlab-ci.yml
+  - template: Jobs/SAST.gitlab-ci.yml
 
 variables:
-  SAST_EXCLUDED_PATHS: "frontend/src/assets/private/**"
-  TEST_DISABLED: "true"
-  DAST_DISABLED: "true"
+  SEARCH_MAX_DEPTH: "10"
+  SAST_EXCLUDED_PATHS: "node_modules,dist,build,coverage,.git"
+
+semgrep-custom-report:
+  stage: report
+  image: python:3.12-slim
+  allow_failure: true
+  before_script:
+    - python --version
+    - pip install --upgrade pip
+    - pip install semgrep
+    - mkdir -p reports
+  script:
+    - semgrep --version
+    - |
+      semgrep scan \
+        --config p/owasp-top-ten \
+        --config p/javascript \
+        --json \
+        --output reports/semgrep-report.json \
+        . || true
+    - |
+      semgrep scan \
+        --config p/owasp-top-ten \
+        --config p/javascript \
+        --sarif \
+        --output reports/semgrep-report.sarif \
+        . || true
+    - |
+      python3 - <<'PY'
+      import json
+      from pathlib import Path
+
+      report_file = Path("reports/semgrep-report.json")
+      summary_file = Path("reports/semgrep-summary.txt")
+
+      if not report_file.exists():
+          summary_file.write_text("Semgrep report was not generated.\n")
+          raise SystemExit(0)
+
+      data = json.loads(report_file.read_text())
+      results = data.get("results", [])
+
+      lines = []
+      lines.append(f"Total Semgrep findings: {len(results)}")
+      lines.append("=" * 100)
+
+      for i, item in enumerate(results[:50], start=1):
+          extra = item.get("extra", {})
+          start = item.get("start", {})
+          lines.append(f"{i}. Rule: {item.get('check_id')}")
+          lines.append(f"   Severity: {extra.get('severity')}")
+          lines.append(f"   Message: {extra.get('message')}")
+          lines.append(f"   File: {item.get('path')}")
+          lines.append(f"   Line: {start.get('line')}")
+          lines.append("-" * 100)
+
+      summary_file.write_text("\n".join(lines))
+      PY
+    - cat reports/semgrep-summary.txt
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - reports/
